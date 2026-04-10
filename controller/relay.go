@@ -47,10 +47,10 @@ func recordRequestLog(c *gin.Context, captureWriter *logger.ResponseCaptureWrite
 		requestBody, _ = storage.Bytes()
 	}
 
-	// 读取响应体（流式响应不捕获，避免内存泄漏）
+	// 读取响应体
 	var responseBody []byte
 	var statusCode int
-	if captureWriter != nil && !logger.IsStreamResponse(c) {
+	if captureWriter != nil {
 		responseBody = captureWriter.GetCapturedBody()
 		statusCode = captureWriter.Status()
 	} else {
