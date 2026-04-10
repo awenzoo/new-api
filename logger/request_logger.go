@@ -31,8 +31,8 @@ const (
 	// maxLogFilesPerUser 每个用户最多保留的日志文件数量
 	maxLogFilesPerUser = 10
 
-	// maxLogFileSize 单个日志文件最大大小 (50MB)
-	maxLogFileSize = 50 * 1024 * 1024
+	// maxLogFileSize 单个日志文件最大大小 (20MB)
+	maxLogFileSize = 20 * 1024 * 1024
 )
 
 // getRequestLogDir 获取请求报文日志目录
