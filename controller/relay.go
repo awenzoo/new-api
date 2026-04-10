@@ -31,6 +31,36 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// recordRequestLog 记录用户请求/响应报文到日志文件（异步）
+func recordRequestLog(c *gin.Context, captureWriter *logger.ResponseCaptureWriter) {
+	if !logger.RequestLogEnabled {
+		return
+	}
+	userId := c.GetInt("id")
+	if userId == 0 {
+		return
+	}
+
+	// 读取请求体
+	var requestBody []byte
+	if storage, err := common.GetBodyStorage(c); err == nil {
+		requestBody, _ = storage.Bytes()
+	}
+
+	// 读取响应体（流式响应不捕获，避免内存泄漏）
+	var responseBody []byte
+	var statusCode int
+	if captureWriter != nil && !logger.IsStreamResponse(c) {
+		responseBody = captureWriter.GetCapturedBody()
+		statusCode = captureWriter.Status()
+	} else {
+		statusCode = c.Writer.Status()
+	}
+
+	reqPath := c.Request.URL.Path
+	logger.LogRequestResponse(userId, requestBody, responseBody, reqPath, statusCode)
+}
+
 func relayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIError {
 	var err *types.NewAPIError
 	switch info.RelayMode {
@@ -67,13 +97,18 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	requestId := c.GetString(common.RequestIdKey)
-	//group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
-	//originalModel := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 
 	var (
 		newAPIError *types.NewAPIError
 		ws          *websocket.Conn
 	)
+
+	// 包装 ResponseWriter 以捕获非流式响应体
+	var captureWriter *logger.ResponseCaptureWriter
+	if logger.RequestLogEnabled && relayFormat != types.RelayFormatOpenAIRealtime {
+		captureWriter = logger.NewResponseCaptureWriter(c.Writer)
+		c.Writer = captureWriter
+	}
 
 	if relayFormat == types.RelayFormatOpenAIRealtime {
 		var err error
@@ -221,6 +256,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
+			recordRequestLog(c, captureWriter)
 			return
 		}
 
