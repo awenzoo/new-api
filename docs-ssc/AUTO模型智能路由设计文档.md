@@ -147,13 +147,14 @@ VALUES ('AUTO', 'AUTO', '智能路由 - 自动选择最合适的模型', 1);
 ```
 service/
 ├── auto_router.go                    # 入口：IsAutoModel + RouteAutoModel + 规则注册
-└── auto_router_rule/                 # 规则包
-    ├── rule.go                       # Rule 接口 + MatchFirst 匹配器 + Request/Message 类型
-    ├── constant.go                   # 模型名常量
-    └── multimodal.go                 # 图片检测规则
+└── auto_router/
+    └── rule/                          # 规则包
+        ├── rule.go                    # Rule 接口 + MatchFirst 匹配器 + Request/Message 类型
+        ├── constant.go                # 模型名常量
+        └── rule_multimodal.go         # 图片检测规则
 ```
 
-**Rule 接口定义（`auto_router_rule/rule.go`）：**
+**Rule 接口定义（`auto_router/rule/rule.go`）：**
 
 ```go
 type Rule interface {
@@ -165,7 +166,7 @@ type Rule interface {
 func MatchFirst(rules []Rule, req *Request) (ruleName string, targetModel string, matched bool)
 ```
 
-**模型名常量（`auto_router_rule/constant.go`）：**
+**模型名常量（`auto_router/rule/constant.go`）：**
 
 ```go
 const (
@@ -177,14 +178,14 @@ const (
 **规则注册（`service/auto_router.go`）：**
 
 ```go
-var autoRouteRules = []auto_router_rule.Rule{
-    auto_router_rule.Multimodal(),
+var autoRouteRules = []rule.Rule{
+    rule.Multimodal(),
 }
 ```
 
-**扩展新规则只需：** 在 `auto_router_rule/` 下新建文件实现 `Rule` 接口，然后在 `autoRouteRules` 切片中注册。
+**扩展新规则只需：** 在 `auto_router/rule/` 下新建文件实现 `Rule` 接口，然后在 `autoRouteRules` 切片中注册。
 
-#### 4.2.3 图片检测规则（`auto_router_rule/multimodal.go`）
+#### 4.2.3 图片检测规则（`auto_router/rule/rule_multimodal.go`）
 
 解析 OpenAI 格式的 messages 数组，检测多模态内容：
 
@@ -312,9 +313,9 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 | 文件 | 变更类型 | 说明 |
 |------|----------|------|
 | `service/auto_router.go` | 新增 | 路由入口：规则注册、RouteAutoModel、RouteAutoModelStatic |
-| `service/auto_router_rule/rule.go` | 新增 | Rule 接口定义、MatchFirst 匹配器、Request/Message 类型 |
-| `service/auto_router_rule/constant.go` | 新增 | 模型名常量 |
-| `service/auto_router_rule/multimodal.go` | 新增 | 图片检测规则 |
+| `service/auto_router/rule/rule.go` | 新增 | Rule 接口定义、MatchFirst 匹配器、Request/Message 类型 |
+| `service/auto_router/rule/constant.go` | 新增 | 模型名常量 |
+| `service/auto_router/rule/rule_multimodal.go` | 新增 | 图片检测规则 |
 | `middleware/distributor.go` | 修改 | AUTO 检测、模型替换、渠道选择日志 |
 | `controller/channel-test.go` | 修改 | 渠道测试时 AUTO 转换为默认真实模型 |
 | `model/log.go` | 修改 | Log 结构体增加 `RoutedModelName` 字段 |
@@ -344,7 +345,7 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 
 ### 7.2 扩展性
 
-- 新增路由规则：在 `auto_router_rule/` 下新建文件实现 `Rule` 接口，在 `autoRouteRules` 注册
+- 新增路由规则：在 `auto_router/rule/` 下新建文件实现 `Rule` 接口，在 `autoRouteRules` 注册
 - 新增候选模型：修改 `constant.go` 中的常量
 - 支持多 AUTO 变体：如 `AUTO-FAST`（只走快速模型）
 
@@ -379,3 +380,43 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 | 路由决策增加延迟 | 毫秒级（本地计算），可忽略 | 特征提取使用简单规则，不调用外部服务 |
 | 模型不可用 | 路由到的模型无可用渠道 | 记录告警，返回错误信息 |
 | 日志字段膨胀 | 存储空间增加 | RoutedModelName 仅对 AUTO 请求有值，影响极小 |
+
+---
+
+## 10. 命名规范
+
+### 文件命名
+
+规则包 `service/auto_router/rule/` 下的文件统一使用 `rule_` 前缀：
+
+| 文件 | 命名格式 | 说明 |
+|------|----------|------|
+| `rule.go` | 基础文件 | 接口定义、类型声明、公共匹配器 |
+| `constant.go` | 基础文件 | 常量定义 |
+| `rule_multimodal.go` | `rule_{规则名}.go` | 图片检测规则 |
+| `rule_code.go` | `rule_{规则名}.go` | 示例：代码检测规则 |
+
+前缀 `rule_` 表明该文件是一个具体的路由规则实现，与基础文件（`rule.go`、`constant.go`）区分开来。
+
+### 导出函数命名
+
+规则构造函数使用大写开头的规则名，返回实现了 `Rule` 接口的实例：
+
+```go
+// rule_multimodal.go
+func Multimodal() Rule { return multimodalRule{} }
+
+// rule_code.go（示例）
+func Code() Rule { return codeRule{} }
+```
+
+在入口文件 `service/auto_router.go` 中注册时：
+
+```go
+import rule "new-api/service/auto_router/rule"
+
+var autoRouteRules = []rule.Rule{
+    rule.Multimodal(),
+    rule.Code(),
+}
+```
