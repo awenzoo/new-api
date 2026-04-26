@@ -73,6 +73,28 @@ func TestRouteRules(t *testing.T) {
 			want: "GLM-5.1",
 		},
 		{
+			name: "code review keyword routes to advanced model",
+			req: &rule.Request{
+				Messages: []rule.Message{
+					{Role: "user", Content: "请帮我代码审查一下这个函数"},
+				},
+			},
+			want: "anthropic/claude-opus-4.6",
+		},
+		{
+			name: "code review keyword in array content routes to advanced model",
+			req: &rule.Request{
+				Messages: []rule.Message{
+					{Role: "user", Content: "帮我review代码"},
+					{Role: "assistant", Content: "好的"},
+					{Role: "user", Content: []interface{}{
+						map[string]interface{}{"type": "text", "text": "请进行code review"},
+					}},
+				},
+			},
+			want: "anthropic/claude-opus-4.6",
+		},
+		{
 			name: "long message defaults to GLM-5.1",
 			req: &rule.Request{
 				Messages: []rule.Message{

@@ -15,6 +15,7 @@ const AutoModelName = "AUTO"
 // autoRouteRules 按优先级排列的路由规则列表，首个匹配生效
 var autoRouteRules = []rule.Rule{
 	rule.Multimodal(),
+	rule.Advanced(),
 	rule.SlowFallback(),
 }
 

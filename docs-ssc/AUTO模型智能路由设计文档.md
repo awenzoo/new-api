@@ -1,25 +1,26 @@
 # AUTO 智能模型路由 — 设计文档
 
-> 版本：v1.2 | 日期：2026-04-26 | 作者：awen
+> 版本：v1.3 | 日期：2026-04-26 | 作者：awen
 
 ---
 
 ## 1. 背景与目标
 
-用户在调用 AI API 时，往往不清楚哪个模型最适合当前请求。本功能提供虚拟模型 `AUTO`，系统自动根据请求内容（是否包含图片）和模型性能（首字响应时间）将请求路由到最合适的真实模型。
+用户在调用 AI API 时，往往不清楚哪个模型最适合当前请求。本功能提供虚拟模型 `AUTO`，系统自动根据请求内容（是否包含图片、是否包含代码审查关键词）和模型性能（首字响应时间）将请求路由到最合适的真实模型。
 
 ### 候选模型
 
 | 模型 | 多模态 | 最大输出 | 推理能力 | 适用场景 |
 |------|--------|----------|----------|----------|
 | Qwen3.6-Plus | 支持（图片） | 16K | 强 | 多模态、代码、Agent |
+| Claude Opus 4.6 | 支持（图片） | 32K | 最强 | 代码审查、深度分析、复杂推理 |
 | GLM-5.1 | 纯文本 | 128K | 强（深度推理） | 长输出、深度推理、通用对话 |
 | GLM-5-Turbo | 纯文本 | - | 快 | GLM-5.1 响应慢时的降级备选 |
 
 ### 设计原则
 
 - **不考虑价格**，仅按请求特征路由
-- **简单明确**：图片走多模态模型，服务慢走快速模型，其他走推理模型
+- **简单明确**：图片走多模态模型，代码审查走高级模型，服务慢走快速模型，其他走推理模型
 - **零侵入**：不改变现有模型调用链路，仅在分发环节拦截替换
 
 ---
@@ -40,8 +41,11 @@
 ```
 请求进入 (model = "AUTO")
 │
-├── messages 包含图片（image_url）？
+├── messages 包含图片（image_url / image）？
 │   └── YES → Qwen3.6-Plus（多模态支持）
+│
+├── 最后一条用户消息包含代码审查关键词？
+│   └── YES → Claude Opus 4.6（高级模型）
 │
 ├── GLM-5.1 近 10 分钟首字响应 > 阈值？
 │   └── YES → GLM-5-Turbo（性能降级）
@@ -56,19 +60,23 @@ flowchart TD
     A[请求进入 model = AUTO] --> B{messages 含图片?}
 
     B -- YES --> C1[Qwen3.6-Plus<br/>多模态支持]
-    B -- NO --> D{GLM-5.1 首字响应 > 阈值?}
+    B -- NO --> E{最后用户消息含<br/>代码审查关键词?}
+    E -- YES --> C4[Claude Opus 4.6<br/>高级模型]
+    E -- NO --> D{GLM-5.1 首字响应 > 阈值?}
     D -- YES --> C3[GLM-5-Turbo<br/>性能降级]
     D -- NO --> C2[GLM-5.1<br/>深度推理 / 长输出 / 通用]
 
     style A fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
     style B fill:#fff3e0,stroke:#f57c00
+    style E fill:#fff3e0,stroke:#f57c00
     style D fill:#fff3e0,stroke:#f57c00
     style C1 fill:#bbdefb,stroke:#1565c0,stroke-width:2px
+    style C4 fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px
     style C2 fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
     style C3 fill:#ffcdd2,stroke:#c62828,stroke-width:2px
 ```
 
-> 图例：橙色菱形 = 路由条件判断，蓝色方框 = 多模态路由结果，绿色方框 = 默认路由结果，红色方框 = 性能降级路由结果
+> 图例：橙色菱形 = 路由条件判断，蓝色方框 = 多模态路由结果，紫色方框 = 高级模型路由结果，绿色方框 = 默认路由结果，红色方框 = 性能降级路由结果
 
 ### 整体处理流程
 
@@ -110,6 +118,7 @@ flowchart LR
 | 条件 | 检测方式 | 路由目标 | 原因 |
 |------|----------|----------|------|
 | 包含图片 | 解析 messages 中 `content` 数组，检测 `type: "image_url"` / `type: "image"` | Qwen3.6-Plus | GLM 系列不支持多模态 |
+| 最后用户消息含代码审查关键词 | 提取最后一条 `role: "user"` 的消息文本，匹配关键词列表（忽略大小写） | Claude Opus 4.6 | 代码审查需要最强推理能力 |
 | 首字响应慢 | 查询 logs 表近 10 分钟 GLM-5.1 的 `other.frt` 平均值 > 阈值 | GLM-5-Turbo | GLM-5.1 服务过载或排队，降级到快速模型 |
 | 其他所有情况 | - | GLM-5.1 | 深度推理能力强，支持 128K 输出 |
 
@@ -161,6 +170,7 @@ service/
         ├── rule.go                    # Rule 接口 + MatchFirst 匹配器 + Request/Message 类型
         ├── constant.go                # 模型名常量 + 阈值配置
         ├── rule_multimodal.go         # 图片检测规则
+        ├── rule_advanced.go           # 高级模型选择规则（代码审查关键词）
         └── rule_slow_fallback.go      # 首字响应慢降级规则
 ```
 
@@ -182,6 +192,7 @@ func MatchFirst(rules []Rule, req *Request) (ruleName string, targetModel string
 const (
     DefaultRoutedModel       = "GLM-5.1"
     MultimodalRoutedModel    = "qwen3.6-plus"
+    AdvancedRoutedModel      = "anthropic/claude-opus-4.6"
     SlowFallbackRoutedModel  = "GLM-5-Turbo"
 
     SlowThresholdFirstTokenMs = 10000 // 默认阈值，可通过环境变量 AUTO_SLOW_THRESHOLD_MS 覆盖
@@ -194,6 +205,7 @@ const (
 ```go
 var autoRouteRules = []rule.Rule{
     rule.Multimodal(),
+    rule.Advanced(),
     rule.SlowFallback(),
 }
 ```
@@ -229,7 +241,49 @@ func (multimodalRule) Match(req *Request) bool {
 func (multimodalRule) TargetModel() string { return MultimodalRoutedModel }
 ```
 
-#### 4.2.4 首字响应慢降级规则（`auto_router/rule/rule_slow_fallback.go`）
+#### 4.2.4 高级模型选择规则（`auto_router/rule/rule_advanced.go`）
+
+匹配最后一条用户消息中是否包含代码审查/分析/重构等关键词，命中则路由到 Claude Opus 4.6。
+
+**关键词列表（忽略大小写匹配）：**
+
+| 类别 | 关键词 |
+|------|--------|
+| 代码审查 | `代码审查`、`代码评审`、`代码走查`、`代码检查`、`审查代码`、`评审代码`、`检查代码` |
+| 代码分析 | `代码分析`、`代码审计`、`分析代码` |
+| 代码重构 | `代码重构`、`代码优化`、`重构代码`、`优化代码` |
+| 中英混合 | `代码review`、`review代码`、`代码audit`、`audit代码` |
+| 英文 | `code review`、`code audit` |
+
+**实现逻辑：**
+
+1. 检查环境变量 `AUTO_ADVANCED_ENABLED`（默认 `true`），为 `false` 时跳过
+2. 从 `messages` 末尾向前查找最后一条 `role: "user"` 的消息
+3. 提取文本内容（支持 `string` 和 `[]interface{}` 两种 content 格式）
+4. 将文本转小写后逐一匹配关键词列表
+
+```go
+type advancedRule struct{}
+
+func (advancedRule) Name() string { return "advanced" }
+func (advancedRule) TargetModel() string { return AdvancedRoutedModel }
+
+func (advancedRule) Match(req *Request) bool {
+    if !common.GetEnvOrDefaultBool("AUTO_ADVANCED_ENABLED", true) {
+        return false
+    }
+    lastUserMsg := lastUserText(req)
+    lower := strings.ToLower(lastUserMsg)
+    for _, kw := range advancedKeywords {
+        if strings.Contains(lower, strings.ToLower(kw)) {
+            return true
+        }
+    }
+    return false
+}
+```
+
+#### 4.2.5 首字响应慢降级规则（`auto_router/rule/rule_slow_fallback.go`）
 
 查询 logs 表中近 10 分钟 GLM-5.1 流式请求的 `other.frt`（首字响应时间，毫秒），平均值超过阈值则路由到 GLM-5-Turbo。
 
@@ -288,6 +342,7 @@ if service.IsAutoModel(testModel) {
 
 ```
 [AUTO] rule=multimodal → model=qwen3.6-plus
+[AUTO] rule=advanced → model=anthropic/claude-opus-4.6
 [AUTO] rule=slow_fallback → model=GLM-5-Turbo
 [AUTO] no rule matched → default model=GLM-5.1
 [AUTO] channel=xxx渠道(id=1) model=qwen3.6-plus
@@ -358,6 +413,7 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 | `service/auto_router/rule/rule.go` | 新增 | Rule 接口定义、MatchFirst 匹配器、Request/Message 类型 |
 | `service/auto_router/rule/constant.go` | 新增 | 模型名常量、阈值配置 |
 | `service/auto_router/rule/rule_multimodal.go` | 新增 | 图片检测规则 |
+| `service/auto_router/rule/rule_advanced.go` | 新增 | 高级模型选择规则（代码审查关键词） |
 | `service/auto_router/rule/rule_slow_fallback.go` | 新增 | 首字响应慢降级规则 |
 | `middleware/distributor.go` | 修改 | AUTO 检测、模型替换、渠道选择日志 |
 | `controller/channel-test.go` | 修改 | 渠道测试时 AUTO 转换为默认真实模型 |
@@ -376,12 +432,14 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
 | `AUTO_SLOW_THRESHOLD_MS` | `10000` | 首字响应时间阈值（毫秒），超过此值判定为慢并降级到 GLM-5-Turbo |
+| `AUTO_ADVANCED_ENABLED` | `true` | 是否启用高级模型选择规则，设为 `false` 时代码审查关键词不触发路由 |
 
 Docker 使用示例：
 
 ```yaml
 environment:
   - AUTO_SLOW_THRESHOLD_MS=15000
+  - AUTO_ADVANCED_ENABLED=false
 ```
 
 ### 7.2 候选模型配置
@@ -414,11 +472,15 @@ environment:
 | 用例 | 输入 | 预期路由 |
 |------|------|----------|
 | 图片理解 | messages 含 image_url | Qwen3.6-Plus |
+| 代码审查关键词 | 最后用户消息含"代码审查" | Claude Opus 4.6 |
+| 代码审查关键词（英文） | 最后用户消息含"code review" | Claude Opus 4.6 |
+| 代码审查关键词（多轮对话） | 前几轮无关键词，最后一轮含"review代码" | Claude Opus 4.6 |
+| 高级规则关闭 | `AUTO_ADVANCED_ENABLED=false` + 含"代码审查" | GLM-5.1 |
 | 普通对话（GLM-5.1 正常） | 无图片，近期首字 < 阈值 | GLM-5.1 |
 | 普通对话（GLM-5.1 慢） | 无图片，近期首字 > 阈值 | GLM-5-Turbo |
 | 深度推理 | 无图片 + thinking 字段 | GLM-5.1 |
 | 工具调用 | 无图片 + tools 字段 | GLM-5.1 |
-| 代码生成 | 无图片 + system_prompt 含"写一段代码" | GLM-5.1 |
+| 代码生成（非审查） | 无图片 + "写一段代码实现快速排序" | GLM-5.1 |
 | 长输出需求 | 无图片 + max_tokens=32768 | GLM-5.1 |
 
 ### 8.2 集成测试
@@ -452,8 +514,8 @@ environment:
 | `rule.go` | 基础文件 | 接口定义、类型声明、公共匹配器 |
 | `constant.go` | 基础文件 | 常量定义 |
 | `rule_multimodal.go` | `rule_{规则名}.go` | 图片检测规则 |
+| `rule_advanced.go` | `rule_{规则名}.go` | 高级模型选择规则 |
 | `rule_slow_fallback.go` | `rule_{规则名}.go` | 首字响应慢降级规则 |
-| `rule_code.go` | `rule_{规则名}.go` | 示例：代码检测规则 |
 
 前缀 `rule_` 表明该文件是一个具体的路由规则实现，与基础文件（`rule.go`、`constant.go`）区分开来。
 
@@ -465,11 +527,11 @@ environment:
 // rule_multimodal.go
 func Multimodal() Rule { return multimodalRule{} }
 
+// rule_advanced.go
+func Advanced() Rule { return advancedRule{} }
+
 // rule_slow_fallback.go
 func SlowFallback() Rule { return slowFallbackRule{} }
-
-// rule_code.go（示例）
-func Code() Rule { return codeRule{} }
 ```
 
 在入口文件 `service/auto_router.go` 中注册时：
