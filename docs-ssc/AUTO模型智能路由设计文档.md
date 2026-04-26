@@ -1,12 +1,12 @@
 # AUTO 智能模型路由 — 设计文档
 
-> 版本：v1.1 | 日期：2026-04-26 | 作者：awen
+> 版本：v1.2 | 日期：2026-04-26 | 作者：awen
 
 ---
 
 ## 1. 背景与目标
 
-用户在调用 AI API 时，往往不清楚哪个模型最适合当前请求。本功能提供虚拟模型 `AUTO`，系统自动根据请求内容（是否包含图片）将请求路由到最合适的真实模型。
+用户在调用 AI API 时，往往不清楚哪个模型最适合当前请求。本功能提供虚拟模型 `AUTO`，系统自动根据请求内容（是否包含图片）和模型性能（首字响应时间）将请求路由到最合适的真实模型。
 
 ### 候选模型
 
@@ -14,11 +14,12 @@
 |------|--------|----------|----------|----------|
 | Qwen3.6-Plus | 支持（图片） | 16K | 强 | 多模态、代码、Agent |
 | GLM-5.1 | 纯文本 | 128K | 强（深度推理） | 长输出、深度推理、通用对话 |
+| GLM-5-Turbo | 纯文本 | - | 快 | GLM-5.1 响应慢时的降级备选 |
 
 ### 设计原则
 
 - **不考虑价格**，仅按请求特征路由
-- **简单明确**：图片走多模态模型，其他走推理模型
+- **简单明确**：图片走多模态模型，服务慢走快速模型，其他走推理模型
 - **零侵入**：不改变现有模型调用链路，仅在分发环节拦截替换
 
 ---
@@ -42,6 +43,9 @@
 ├── messages 包含图片（image_url）？
 │   └── YES → Qwen3.6-Plus（多模态支持）
 │
+├── GLM-5.1 近 10 分钟首字响应 > 阈值？
+│   └── YES → GLM-5-Turbo（性能降级）
+│
 └── NO → GLM-5.1（默认：深度推理、长输出、通用对话）
 ```
 
@@ -52,15 +56,19 @@ flowchart TD
     A[请求进入 model = AUTO] --> B{messages 含图片?}
 
     B -- YES --> C1[Qwen3.6-Plus<br/>多模态支持]
-    B -- NO --> C2[GLM-5.1<br/>深度推理 / 长输出 / 通用]
+    B -- NO --> D{GLM-5.1 首字响应 > 阈值?}
+    D -- YES --> C3[GLM-5-Turbo<br/>性能降级]
+    D -- NO --> C2[GLM-5.1<br/>深度推理 / 长输出 / 通用]
 
     style A fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
     style B fill:#fff3e0,stroke:#f57c00
+    style D fill:#fff3e0,stroke:#f57c00
     style C1 fill:#bbdefb,stroke:#1565c0,stroke-width:2px
     style C2 fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
+    style C3 fill:#ffcdd2,stroke:#c62828,stroke-width:2px
 ```
 
-> 图例：橙色菱形 = 路由条件判断，蓝色方框 = 多模态路由结果，绿色方框 = 默认路由结果
+> 图例：橙色菱形 = 路由条件判断，蓝色方框 = 多模态路由结果，绿色方框 = 默认路由结果，红色方框 = 性能降级路由结果
 
 ### 整体处理流程
 
@@ -101,7 +109,8 @@ flowchart LR
 
 | 条件 | 检测方式 | 路由目标 | 原因 |
 |------|----------|----------|------|
-| 包含图片 | 解析 messages 中 `content` 数组，检测 `type: "image_url"` | Qwen3.6-Plus | GLM 系列不支持多模态 |
+| 包含图片 | 解析 messages 中 `content` 数组，检测 `type: "image_url"` / `type: "image"` | Qwen3.6-Plus | GLM 系列不支持多模态 |
+| 首字响应慢 | 查询 logs 表近 10 分钟 GLM-5.1 的 `other.frt` 平均值 > 阈值 | GLM-5-Turbo | GLM-5.1 服务过载或排队，降级到快速模型 |
 | 其他所有情况 | - | GLM-5.1 | 深度推理能力强，支持 128K 输出 |
 
 ---
@@ -150,8 +159,9 @@ service/
 └── auto_router/
     └── rule/                          # 规则包
         ├── rule.go                    # Rule 接口 + MatchFirst 匹配器 + Request/Message 类型
-        ├── constant.go                # 模型名常量
-        └── rule_multimodal.go         # 图片检测规则
+        ├── constant.go                # 模型名常量 + 阈值配置
+        ├── rule_multimodal.go         # 图片检测规则
+        └── rule_slow_fallback.go      # 首字响应慢降级规则
 ```
 
 **Rule 接口定义（`auto_router/rule/rule.go`）：**
@@ -170,8 +180,12 @@ func MatchFirst(rules []Rule, req *Request) (ruleName string, targetModel string
 
 ```go
 const (
-    DefaultRoutedModel    = "GLM-5.1"
-    MultimodalRoutedModel = "qwen3.6-plus"
+    DefaultRoutedModel       = "GLM-5.1"
+    MultimodalRoutedModel    = "qwen3.6-plus"
+    SlowFallbackRoutedModel  = "GLM-5-Turbo"
+
+    SlowThresholdFirstTokenMs = 10000 // 默认阈值，可通过环境变量 AUTO_SLOW_THRESHOLD_MS 覆盖
+    slowCheckWindow           = 10    // 检测窗口（分钟）
 )
 ```
 
@@ -180,6 +194,7 @@ const (
 ```go
 var autoRouteRules = []rule.Rule{
     rule.Multimodal(),
+    rule.SlowFallback(),
 }
 ```
 
@@ -213,6 +228,31 @@ func (multimodalRule) Match(req *Request) bool {
 
 func (multimodalRule) TargetModel() string { return MultimodalRoutedModel }
 ```
+
+#### 4.2.4 首字响应慢降级规则（`auto_router/rule/rule_slow_fallback.go`）
+
+查询 logs 表中近 10 分钟 GLM-5.1 流式请求的 `other.frt`（首字响应时间，毫秒），平均值超过阈值则路由到 GLM-5-Turbo。
+
+**性能优化：** 由于查询涉及 `other` JSON 字段的解析（单次约 1.2s），采用内存缓存 + TTL 策略：
+
+- 查询结果缓存 60 秒，期间所有 AUTO 请求直接读内存（纳秒级）
+- 双重检查锁定（`RLock` 快路径 + `Lock` 慢路径），并发安全
+- 缓存过期后由下一个请求触发刷新，无需额外定时器
+
+```go
+type slowFallbackRule struct{}
+
+func (slowFallbackRule) Name() string { return "slow_fallback" }
+
+func (slowFallbackRule) Match(_ *Request) bool {
+    avgFrt := getCachedAvgFrt()  // 读缓存（60s TTL），过期时查库刷新
+    return avgFrt > threshold
+}
+
+func (slowFallbackRule) TargetModel() string { return SlowFallbackRoutedModel }
+```
+
+**数据来源：** 首字响应时间由 `relay/common/relay_info.go` 的 `SetFirstResponseTime()` 在流式首个 chunk 到达时记录，通过 `service/log_info_generate.go` 写入日志的 `other.frt` 字段，无需额外建表或加字段。
 
 ### 4.3 拦截点
 
@@ -248,6 +288,8 @@ if service.IsAutoModel(testModel) {
 
 ```
 [AUTO] rule=multimodal → model=qwen3.6-plus
+[AUTO] rule=slow_fallback → model=GLM-5-Turbo
+[AUTO] no rule matched → default model=GLM-5.1
 [AUTO] channel=xxx渠道(id=1) model=qwen3.6-plus
 ```
 
@@ -314,8 +356,9 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 |------|----------|------|
 | `service/auto_router.go` | 新增 | 路由入口：规则注册、RouteAutoModel、RouteAutoModelStatic |
 | `service/auto_router/rule/rule.go` | 新增 | Rule 接口定义、MatchFirst 匹配器、Request/Message 类型 |
-| `service/auto_router/rule/constant.go` | 新增 | 模型名常量 |
+| `service/auto_router/rule/constant.go` | 新增 | 模型名常量、阈值配置 |
 | `service/auto_router/rule/rule_multimodal.go` | 新增 | 图片检测规则 |
+| `service/auto_router/rule/rule_slow_fallback.go` | 新增 | 首字响应慢降级规则 |
 | `middleware/distributor.go` | 修改 | AUTO 检测、模型替换、渠道选择日志 |
 | `controller/channel-test.go` | 修改 | 渠道测试时 AUTO 转换为默认真实模型 |
 | `model/log.go` | 修改 | Log 结构体增加 `RoutedModelName` 字段 |
@@ -328,7 +371,20 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 
 ## 7. 配置与扩展
 
-### 7.1 候选模型配置
+### 7.1 环境变量配置
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `AUTO_SLOW_THRESHOLD_MS` | `10000` | 首字响应时间阈值（毫秒），超过此值判定为慢并降级到 GLM-5-Turbo |
+
+Docker 使用示例：
+
+```yaml
+environment:
+  - AUTO_SLOW_THRESHOLD_MS=15000
+```
+
+### 7.2 候选模型配置
 
 路由目标模型通过配置文件或数据库管理，支持动态调整：
 
@@ -343,7 +399,7 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 }
 ```
 
-### 7.2 扩展性
+### 7.3 扩展性
 
 - 新增路由规则：在 `auto_router/rule/` 下新建文件实现 `Rule` 接口，在 `autoRouteRules` 注册
 - 新增候选模型：修改 `constant.go` 中的常量
@@ -358,7 +414,8 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 | 用例 | 输入 | 预期路由 |
 |------|------|----------|
 | 图片理解 | messages 含 image_url | Qwen3.6-Plus |
-| 普通对话 | 无图片 | GLM-5.1 |
+| 普通对话（GLM-5.1 正常） | 无图片，近期首字 < 阈值 | GLM-5.1 |
+| 普通对话（GLM-5.1 慢） | 无图片，近期首字 > 阈值 | GLM-5-Turbo |
 | 深度推理 | 无图片 + thinking 字段 | GLM-5.1 |
 | 工具调用 | 无图片 + tools 字段 | GLM-5.1 |
 | 代码生成 | 无图片 + system_prompt 含"写一段代码" | GLM-5.1 |
@@ -377,9 +434,10 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 
 | 风险 | 影响 | 应对 |
 |------|------|------|
-| 路由决策增加延迟 | 毫秒级（本地计算），可忽略 | 特征提取使用简单规则，不调用外部服务 |
+| 路由决策增加延迟 | 毫秒级（本地计算 + 单次 DB 聚合查询），可忽略 | 特征提取使用简单规则，不调用外部服务 |
 | 模型不可用 | 路由到的模型无可用渠道 | 记录告警，返回错误信息 |
 | 日志字段膨胀 | 存储空间增加 | RoutedModelName 仅对 AUTO 请求有值，影响极小 |
+| 首字响应数据不足 | 近 10 分钟无 GLM-5.1 流式请求时不触发降级 | 无数据时不匹配，走默认 GLM-5.1 |
 
 ---
 
@@ -394,6 +452,7 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 | `rule.go` | 基础文件 | 接口定义、类型声明、公共匹配器 |
 | `constant.go` | 基础文件 | 常量定义 |
 | `rule_multimodal.go` | `rule_{规则名}.go` | 图片检测规则 |
+| `rule_slow_fallback.go` | `rule_{规则名}.go` | 首字响应慢降级规则 |
 | `rule_code.go` | `rule_{规则名}.go` | 示例：代码检测规则 |
 
 前缀 `rule_` 表明该文件是一个具体的路由规则实现，与基础文件（`rule.go`、`constant.go`）区分开来。
@@ -406,6 +465,9 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 // rule_multimodal.go
 func Multimodal() Rule { return multimodalRule{} }
 
+// rule_slow_fallback.go
+func SlowFallback() Rule { return slowFallbackRule{} }
+
 // rule_code.go（示例）
 func Code() Rule { return codeRule{} }
 ```
@@ -417,6 +479,6 @@ import rule "new-api/service/auto_router/rule"
 
 var autoRouteRules = []rule.Rule{
     rule.Multimodal(),
-    rule.Code(),
+    rule.SlowFallback(),
 }
 ```
