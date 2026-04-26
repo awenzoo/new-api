@@ -77,6 +77,9 @@ func testChannel(channel *model.Channel, testModel string, endpointType string, 
 	c, _ := gin.CreateTestContext(w)
 
 	testModel = strings.TrimSpace(testModel)
+	if service.IsAutoModel(testModel) {
+		testModel = service.RouteAutoModelStatic()
+	}
 	if testModel == "" {
 		if channel.TestModel != nil && *channel.TestModel != "" {
 			testModel = strings.TrimSpace(*channel.TestModel)

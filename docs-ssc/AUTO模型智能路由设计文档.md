@@ -1,6 +1,6 @@
 # AUTO 智能模型路由 — 设计文档
 
-> 版本：v1.0 | 日期：2026-04-23 | 作者：awen
+> 版本：v1.1 | 日期：2026-04-26 | 作者：awen
 
 ---
 
@@ -140,51 +140,77 @@ VALUES ('AUTO', 'AUTO', '智能路由 - 自动选择最合适的模型', 1);
 
 #### 4.2.2 路由决策引擎
 
-新增文件 `service/auto_router.go`，核心逻辑：
+采用规则包架构，每个路由规则独立一个文件，实现统一的 `Rule` 接口。
+
+**包结构：**
+
+```
+service/
+├── auto_router.go                    # 入口：IsAutoModel + RouteAutoModel + 规则注册
+└── auto_router_rule/                 # 规则包
+    ├── rule.go                       # Rule 接口 + MatchFirst 匹配器 + Request/Message 类型
+    ├── constant.go                   # 模型名常量
+    └── multimodal.go                 # 图片检测规则
+```
+
+**Rule 接口定义（`auto_router_rule/rule.go`）：**
 
 ```go
-package service
+type Rule interface {
+    Name() string
+    Match(req *Request) bool
+    TargetModel() string
+}
 
-// RouteRequest 根据请求特征返回最合适的模型名称
-func RouteRequest(req *AutoRouteRequest) string {
-    // 图片请求走多模态模型
-    if req.HasImage {
-        return "qwen3.6-plus"
-    }
+func MatchFirst(rules []Rule, req *Request) (ruleName string, targetModel string, matched bool)
+```
 
-    // 默认走推理模型
-    return "GML-5.1"
+**模型名常量（`auto_router_rule/constant.go`）：**
+
+```go
+const (
+    DefaultRoutedModel    = "GLM-5.1"
+    MultimodalRoutedModel = "qwen3.6-plus"
+)
+```
+
+**规则注册（`service/auto_router.go`）：**
+
+```go
+var autoRouteRules = []auto_router_rule.Rule{
+    auto_router_rule.Multimodal(),
 }
 ```
 
-请求特征提取结构：
+**扩展新规则只需：** 在 `auto_router_rule/` 下新建文件实现 `Rule` 接口，然后在 `autoRouteRules` 切片中注册。
 
-```go
-type AutoRouteRequest struct {
-    HasImage bool
-}
-```
-
-#### 4.2.3 图片检测
+#### 4.2.3 图片检测规则（`auto_router_rule/multimodal.go`）
 
 解析 OpenAI 格式的 messages 数组，检测多模态内容：
 
 ```go
-func detectImage(messages []Message) bool {
-    for _, msg := range messages {
-        // content 可能是 string 或 []interface{}
-        if contentArray, ok := msg.Content.([]interface{}); ok {
-            for _, item := range contentArray {
-                if part, ok := item.(map[string]interface{}); ok {
-                    if part["type"] == "image_url" {
-                        return true
-                    }
+type multimodalRule struct{}
+
+func (multimodalRule) Name() string { return "multimodal" }
+
+func (multimodalRule) Match(req *Request) bool {
+    for _, msg := range req.Messages {
+        parts, ok := msg.Content.([]interface{})
+        if !ok {
+            continue
+        }
+        for _, item := range parts {
+            if part, ok := item.(map[string]interface{}); ok {
+                if part["type"] == "image_url" {
+                    return true
                 }
             }
         }
     }
     return false
 }
+
+func (multimodalRule) TargetModel() string { return MultimodalRoutedModel }
 ```
 
 ### 4.3 拦截点
@@ -193,20 +219,41 @@ func detectImage(messages []Message) bool {
 
 ```go
 // 在 SetupContextForSelectedChannel 调用之前
-if isAutoModel(modelName) {
-    hasImage := detectImageFromMessages(c.Request.Body)
-    routedModel := "GML-5.1"
-    if hasImage {
-        routedModel = "qwen3.6-plus"
+if service.IsAutoModel(modelRequest.Model) {
+    if routed := service.RouteAutoModel(c); routed != "" {
+        c.Set("auto_original_model", modelRequest.Model)
+        modelRequest.Model = routed
     }
-    c.Set("auto_routed_model", routedModel)  // 记录实际路由的模型
-    modelName = routedModel                    // 替换模型名称
 }
 ```
 
 关键：替换在渠道选择之前完成，后续的渠道匹配、计费、日志都使用替换后的真实模型名。
 
-### 4.4 日志增强
+### 4.4 渠道测试兼容
+
+渠道测试直接发送模型名到上游，绕过 distributor 路由。在 `controller/channel-test.go` 中对 AUTO 模型做特殊处理：
+
+```go
+if service.IsAutoModel(testModel) {
+    testModel = service.RouteAutoModelStatic()
+}
+```
+
+`RouteAutoModelStatic()` 返回默认路由模型（无请求体时无法判断规则，直接返回默认值）。
+
+### 4.5 控制台日志
+
+路由过程中输出两行日志：
+
+```
+[AUTO] rule=multimodal → model=qwen3.6-plus
+[AUTO] channel=xxx渠道(id=1) model=qwen3.6-plus
+```
+
+- **规则匹配日志**（`service/auto_router.go`）：命中规则名和目标模型，或默认模型
+- **渠道选择日志**（`middleware/distributor.go`）：最终分配的渠道名称、ID 和模型名
+
+### 4.6 日志增强
 
 #### 方案：扩展 Log 表
 
@@ -225,7 +272,7 @@ type Log struct {
 - `RoutedModelName`：实际路由到的模型名（如 "qwen3.6-plus"）
 - 非 AUTO 请求时 `RoutedModelName` 为空，不影响现有日志
 
-### 4.5 前端展示
+### 4.7 前端展示
 
 #### 模型广场
 
@@ -264,8 +311,12 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 
 | 文件 | 变更类型 | 说明 |
 |------|----------|------|
-| `service/auto_router.go` | 新增 | 路由决策引擎核心逻辑 |
-| `middleware/distributor.go` | 修改 | 插入 AUTO 检测和模型替换逻辑 |
+| `service/auto_router.go` | 新增 | 路由入口：规则注册、RouteAutoModel、RouteAutoModelStatic |
+| `service/auto_router_rule/rule.go` | 新增 | Rule 接口定义、MatchFirst 匹配器、Request/Message 类型 |
+| `service/auto_router_rule/constant.go` | 新增 | 模型名常量 |
+| `service/auto_router_rule/multimodal.go` | 新增 | 图片检测规则 |
+| `middleware/distributor.go` | 修改 | AUTO 检测、模型替换、渠道选择日志 |
+| `controller/channel-test.go` | 修改 | 渠道测试时 AUTO 转换为默认真实模型 |
 | `model/log.go` | 修改 | Log 结构体增加 `RoutedModelName` 字段 |
 | `model/main.go` | 修改 | 数据库迁移，新增字段 |
 | `service/quota.go` | 修改 | 计费日志记录时写入路由模型名 |
@@ -285,7 +336,7 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
   "auto_route": {
     "models": {
       "multimodal": "qwen3.6-plus",
-      "default": "GML-5.1"
+      "default": "GLM-5.1"
     }
   }
 }
@@ -293,8 +344,8 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 
 ### 7.2 扩展性
 
-- 新增候选模型：修改配置中的映射即可
-- 新增路由规则：在 `RouteRequest` 函数中增加条件判断
+- 新增路由规则：在 `auto_router_rule/` 下新建文件实现 `Rule` 接口，在 `autoRouteRules` 注册
+- 新增候选模型：修改 `constant.go` 中的常量
 - 支持多 AUTO 变体：如 `AUTO-FAST`（只走快速模型）
 
 ---
