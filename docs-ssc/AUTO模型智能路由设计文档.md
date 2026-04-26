@@ -6,21 +6,19 @@
 
 ## 1. 背景与目标
 
-用户在调用 AI API 时，往往不清楚哪个模型最适合当前请求。本功能提供虚拟模型 `AUTO`，系统自动根据请求内容（图片、代码、推理、输出长度等特征）将请求路由到最合适的真实模型。
+用户在调用 AI API 时，往往不清楚哪个模型最适合当前请求。本功能提供虚拟模型 `AUTO`，系统自动根据请求内容（是否包含图片）将请求路由到最合适的真实模型。
 
 ### 候选模型
 
 | 模型 | 多模态 | 最大输出 | 推理能力 | 适用场景 |
 |------|--------|----------|----------|----------|
 | Qwen3.6-Plus | 支持（图片） | 16K | 强 | 多模态、代码、Agent |
-| Qwen3.5-Plus | 支持（图片） | 16K | 中 | 快速响应、通用对话 |
-| GLM-5.1 | 纯文本 | 128K | 强（深度推理） | 长输出、深度推理 |
-| GLM-5 | 纯文本 | 16K | 中 | GLM-5.1 的降级备选 |
+| GLM-5.1 | 纯文本 | 128K | 强（深度推理） | 长输出、深度推理、通用对话 |
 
 ### 设计原则
 
 - **不考虑价格**，仅按请求特征路由
-- **默认快，按需升级**（参考 OpenAI 教训：不要替用户做慢决策）
+- **简单明确**：图片走多模态模型，其他走推理模型
 - **零侵入**：不改变现有模型调用链路，仅在分发环节拦截替换
 
 ---
@@ -41,71 +39,28 @@
 ```
 请求进入 (model = "AUTO")
 │
-├── L0: 硬约束（必须满足）
-│   ├── max_tokens > 16384 ?
-│   │   └── YES → GLM-5.1（唯一支持 128K 输出）
-│   │
-│   ├── messages 包含图片（image_url）？
-│   │   └── YES → Qwen3.6-Plus（多模态支持）
-│   │
-│   └── context 长度 > 200K tokens？
-│       └── YES → Qwen3.5-Plus（长上下文窗口）
+├── messages 包含图片（image_url）？
+│   └── YES → Qwen3.6-Plus（多模态支持）
 │
-├── L1: 升级信号（按优先级）
-│   ├── thinking / budget_tokens / reasoning_effort 存在？
-│   │   └── YES → GLM-5.1（深度推理模型）
-│   │
-│   ├── tools / function_call 存在？
-│   │   └── YES → Qwen3.6-Plus（工具调用 + Agent）
-│   │
-│   └── system_prompt 或 messages 含代码关键词？
-│       └── YES → Qwen3.6-Plus（代码能力强）
-│
-└── L2: 默认
-    └── Qwen3.5-Plus（响应最快，通用能力均衡）
+└── NO → GLM-5.1（默认：深度推理、长输出、通用对话）
 ```
 
 ### 路由流程图
 
 ```mermaid
 flowchart TD
-    A[请求进入 model = AUTO] --> B{max_tokens > 16384?}
+    A[请求进入 model = AUTO] --> B{messages 含图片?}
 
-    B -- YES --> C1[GLM-5.1<br/>唯一支持 128K 输出]
-    B -- NO --> D{messages 含图片?}
-
-    D -- YES --> C2[Qwen3.6-Plus<br/>多模态支持]
-    D -- NO --> E{context > 200K tokens?}
-
-    E -- YES --> C3[Qwen3.5-Plus<br/>长上下文窗口]
-    E -- NO --> F{含 thinking /<br/>budget_tokens /<br/>reasoning_effort?}
-
-    F -- YES --> C4[GLM-5.1<br/>深度推理模型]
-    F -- NO --> G{含 tools /<br/>function_call?}
-
-    G -- YES --> C5[Qwen3.6-Plus<br/>工具调用 + Agent]
-    G -- NO --> H{含代码关键词?}
-
-    H -- YES --> C6[Qwen3.6-Plus<br/>代码能力强]
-    H -- NO --> C7[Qwen3.5-Plus<br/>响应最快 / 通用均衡]
+    B -- YES --> C1[Qwen3.6-Plus<br/>多模态支持]
+    B -- NO --> C2[GLM-5.1<br/>深度推理 / 长输出 / 通用]
 
     style A fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
     style B fill:#fff3e0,stroke:#f57c00
-    style D fill:#fff3e0,stroke:#f57c00
-    style E fill:#fff3e0,stroke:#f57c00
-    style F fill:#e8f5e9,stroke:#388e3c
-    style G fill:#e8f5e9,stroke:#388e3c
-    style H fill:#e8f5e9,stroke:#388e3c
     style C1 fill:#bbdefb,stroke:#1565c0,stroke-width:2px
-    style C2 fill:#bbdefb,stroke:#1565c0,stroke-width:2px
-    style C3 fill:#bbdefb,stroke:#1565c0,stroke-width:2px
-    style C4 fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
-    style C5 fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
-    style C6 fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
-    style C7 fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    style C2 fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
 ```
 
-> 图例：橙色菱形 = L0 硬约束，绿色菱形 = L1 升级信号，蓝色方框 = L0 路由结果，绿色方框 = L1 路由结果，紫色方框 = L2 默认路由
+> 图例：橙色菱形 = 路由条件判断，蓝色方框 = 多模态路由结果，绿色方框 = 默认路由结果
 
 ### 整体处理流程
 
@@ -142,25 +97,12 @@ flowchart LR
     style BILL fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
 ```
 
-### L0 硬约束说明
+### 路由规则说明
 
 | 条件 | 检测方式 | 路由目标 | 原因 |
 |------|----------|----------|------|
-| `max_tokens > 16384` | 解析请求体 `max_tokens` 字段 | GLM-5.1 | 其他模型输出上限为 16K，GLM-5.1 支持 128K |
 | 包含图片 | 解析 messages 中 `content` 数组，检测 `type: "image_url"` | Qwen3.6-Plus | GLM 系列不支持多模态 |
-| 超长上下文 | 估算 prompt tokens > 200K | Qwen3.5-Plus | 需要超大上下文窗口 |
-
-### L1 升级信号说明
-
-| 信号 | 检测方式 | 路由目标 | 原因 |
-|------|----------|----------|------|
-| 深度推理 | 请求体含 `thinking`、`budget_tokens`、`reasoning_effort` | GLM-5.1 | 专为深度推理优化 |
-| 工具调用 | 请求体含 `tools` 或 `functions` | Qwen3.6-Plus | 工具调用 + Agent 场景表现最优 |
-| 代码相关 | system_prompt/messages 含 code/编程/debug 等关键词 | Qwen3.6-Plus | 代码生成能力强 |
-
-### L2 默认路由
-
-- **Qwen3.5-Plus**：响应速度最快，通用能力均衡，适合绝大多数日常对话场景
+| 其他所有情况 | - | GLM-5.1 | 深度推理能力强，支持 128K 输出 |
 
 ---
 
@@ -205,30 +147,13 @@ package service
 
 // RouteRequest 根据请求特征返回最合适的模型名称
 func RouteRequest(req *AutoRouteRequest) string {
-    // L0: 硬约束
-    if req.MaxTokens > 16384 {
-        return "glm-5.1"
-    }
+    // 图片请求走多模态模型
     if req.HasImage {
         return "qwen3.6-plus"
     }
-    if req.EstimatedContextTokens > 200000 {
-        return "qwen3.5-plus"
-    }
 
-    // L1: 升级信号
-    if req.HasThinking || req.HasBudgetTokens || req.HasReasoningEffort {
-        return "glm-5.1"
-    }
-    if req.HasTools || req.HasFunctionCall {
-        return "qwen3.6-plus"
-    }
-    if req.HasCodeSignals {
-        return "qwen3.6-plus"
-    }
-
-    // L2: 默认
-    return "qwen3.5-plus"
+    // 默认走推理模型
+    return "GML-5.1"
 }
 ```
 
@@ -236,15 +161,7 @@ func RouteRequest(req *AutoRouteRequest) string {
 
 ```go
 type AutoRouteRequest struct {
-    MaxTokens              int
-    HasImage               bool
-    EstimatedContextTokens int
-    HasThinking            bool
-    HasBudgetTokens        bool
-    HasReasoningEffort     bool
-    HasTools               bool
-    HasFunctionCall        bool
-    HasCodeSignals         bool
+    HasImage bool
 }
 ```
 
@@ -270,29 +187,6 @@ func detectImage(messages []Message) bool {
 }
 ```
 
-#### 4.2.4 代码信号检测
-
-通过关键词匹配检测代码相关请求：
-
-```go
-var codeKeywords = []string{"code", "编程", "debug", "函数", "implement", "refactor", "代码"}
-
-func detectCodeSignals(messages []Message, systemPrompt string) bool {
-    text := strings.ToLower(systemPrompt)
-    for _, msg := range messages {
-        if s, ok := msg.Content.(string); ok {
-            text += " " + strings.ToLower(s)
-        }
-    }
-    for _, kw := range codeKeywords {
-        if strings.Contains(text, kw) {
-            return true
-        }
-    }
-    return false
-}
-```
-
 ### 4.3 拦截点
 
 在 `middleware/distributor.go` 中，模型分发前插入 AUTO 路由逻辑：
@@ -300,8 +194,11 @@ func detectCodeSignals(messages []Message, systemPrompt string) bool {
 ```go
 // 在 SetupContextForSelectedChannel 调用之前
 if isAutoModel(modelName) {
-    routeReq := extractRouteFeatures(c.Request.Body)
-    routedModel := RouteRequest(routeReq)
+    hasImage := detectImageFromMessages(c.Request.Body)
+    routedModel := "GML-5.1"
+    if hasImage {
+        routedModel = "qwen3.6-plus"
+    }
     c.Set("auto_routed_model", routedModel)  // 记录实际路由的模型
     modelName = routedModel                    // 替换模型名称
 }
@@ -388,15 +285,7 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
   "auto_route": {
     "models": {
       "multimodal": "qwen3.6-plus",
-      "reasoning": "glm-5.1",
-      "code": "qwen3.6-plus",
-      "long_output": "glm-5.1",
-      "long_context": "qwen3.5-plus",
-      "default": "qwen3.5-plus"
-    },
-    "thresholds": {
-      "max_tokens_output": 16384,
-      "context_tokens": 200000
+      "default": "GML-5.1"
     }
   }
 }
@@ -405,8 +294,8 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 ### 7.2 扩展性
 
 - 新增候选模型：修改配置中的映射即可
-- 新增路由规则：在 `RouteRequest` 函数中增加 L0/L1 条件
-- 支持多 AUTO 变体：如 `AUTO-CODE`（只走代码模型）、`AUTO-FAST`（只走快速模型）
+- 新增路由规则：在 `RouteRequest` 函数中增加条件判断
+- 支持多 AUTO 变体：如 `AUTO-FAST`（只走快速模型）
 
 ---
 
@@ -416,13 +305,12 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 
 | 用例 | 输入 | 预期路由 |
 |------|------|----------|
-| 超长输出需求 | max_tokens=32768 | GLM-5.1 |
 | 图片理解 | messages 含 image_url | Qwen3.6-Plus |
-| 深度推理 | 含 thinking 字段 | GLM-5.1 |
-| 工具调用 | 含 tools 字段 | Qwen3.6-Plus |
-| 代码生成 | system_prompt 含"写一段代码" | Qwen3.6-Plus |
-| 普通对话 | 无特殊信号 | Qwen3.5-Plus |
-| 图片+长输出 | image_url + max_tokens=20000 | GLM-5.1（L0 优先级：max_tokens） |
+| 普通对话 | 无图片 | GLM-5.1 |
+| 深度推理 | 无图片 + thinking 字段 | GLM-5.1 |
+| 工具调用 | 无图片 + tools 字段 | GLM-5.1 |
+| 代码生成 | 无图片 + system_prompt 含"写一段代码" | GLM-5.1 |
+| 长输出需求 | 无图片 + max_tokens=32768 | GLM-5.1 |
 
 ### 8.2 集成测试
 
@@ -438,6 +326,5 @@ CREATE INDEX idx_logs_routed_model_name ON logs (routed_model_name);
 | 风险 | 影响 | 应对 |
 |------|------|------|
 | 路由决策增加延迟 | 毫秒级（本地计算），可忽略 | 特征提取使用简单规则，不调用外部服务 |
-| 代码关键词误判 | 简单对话被路由到代码模型 | L1 信号权重低于 L0，默认回退 Qwen3.5-Plus |
-| 模型不可用 | 路由到的模型无可用渠道 | 降级到默认模型 Qwen3.5-Plus，记录告警 |
+| 模型不可用 | 路由到的模型无可用渠道 | 记录告警，返回错误信息 |
 | 日志字段膨胀 | 存储空间增加 | RoutedModelName 仅对 AUTO 请求有值，影响极小 |
