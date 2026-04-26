@@ -1,4 +1,4 @@
-package auto_router_rule
+package rule
 
 const (
 	DefaultRoutedModel   = "GLM-5.1"

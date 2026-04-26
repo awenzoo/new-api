@@ -1,9 +1,9 @@
-package service
+package auto_router
 
 import (
 	"testing"
 
-	"github.com/QuantumNous/new-api/service/auto_router_rule"
+	"github.com/QuantumNous/new-api/service/auto_router/rule"
 )
 
 func TestIsAutoModel(t *testing.T) {
@@ -31,13 +31,13 @@ func TestIsAutoModel(t *testing.T) {
 func TestRouteRules(t *testing.T) {
 	tests := []struct {
 		name string
-		req  *auto_router_rule.Request
+		req  *rule.Request
 		want string
 	}{
 		{
 			name: "image in messages routes to qwen3.6-plus",
-			req: &auto_router_rule.Request{
-				Messages: []auto_router_rule.Message{
+			req: &rule.Request{
+				Messages: []rule.Message{
 					{
 						Role: "user",
 						Content: []interface{}{
@@ -51,8 +51,8 @@ func TestRouteRules(t *testing.T) {
 		},
 		{
 			name: "plain conversation defaults to GLM-5.1",
-			req: &auto_router_rule.Request{
-				Messages: []auto_router_rule.Message{
+			req: &rule.Request{
+				Messages: []rule.Message{
 					{Role: "user", Content: "你好，今天天气怎么样？"},
 				},
 			},
@@ -60,13 +60,13 @@ func TestRouteRules(t *testing.T) {
 		},
 		{
 			name: "empty request defaults to GLM-5.1",
-			req:  &auto_router_rule.Request{},
+			req:  &rule.Request{},
 			want: "GLM-5.1",
 		},
 		{
 			name: "code keyword still defaults to GLM-5.1",
-			req: &auto_router_rule.Request{
-				Messages: []auto_router_rule.Message{
+			req: &rule.Request{
+				Messages: []rule.Message{
 					{Role: "user", Content: "写一段代码实现快速排序"},
 				},
 			},
@@ -74,8 +74,8 @@ func TestRouteRules(t *testing.T) {
 		},
 		{
 			name: "long message defaults to GLM-5.1",
-			req: &auto_router_rule.Request{
-				Messages: []auto_router_rule.Message{
+			req: &rule.Request{
+				Messages: []rule.Message{
 					{Role: "user", Content: "帮我查一下天气"},
 				},
 			},
@@ -85,12 +85,12 @@ func TestRouteRules(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, model, ok := auto_router_rule.MatchFirst(autoRouteRules, tt.req)
+			_, model, ok := rule.MatchFirst(autoRouteRules, tt.req)
 			var got string
 			if ok {
 				got = model
 			} else {
-				got = auto_router_rule.DefaultRoutedModel
+				got = rule.DefaultRoutedModel
 			}
 			if got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
@@ -102,7 +102,7 @@ func TestRouteRules(t *testing.T) {
 func TestMultimodalRule(t *testing.T) {
 	tests := []struct {
 		name     string
-		messages []auto_router_rule.Message
+		messages []rule.Message
 		want     bool
 	}{
 		{
@@ -112,12 +112,12 @@ func TestMultimodalRule(t *testing.T) {
 		},
 		{
 			name:     "string content",
-			messages: []auto_router_rule.Message{{Role: "user", Content: "hello"}},
+			messages: []rule.Message{{Role: "user", Content: "hello"}},
 			want:     false,
 		},
 		{
-			name: "array content with image",
-			messages: []auto_router_rule.Message{
+			name: "array content with image (OpenAI format)",
+			messages: []rule.Message{
 				{
 					Role: "user",
 					Content: []interface{}{
@@ -128,8 +128,21 @@ func TestMultimodalRule(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "array content with image (Anthropic format)",
+			messages: []rule.Message{
+				{
+					Role: "user",
+					Content: []interface{}{
+						map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "base64"}},
+						map[string]interface{}{"type": "text", "text": "describe this"},
+					},
+				},
+			},
+			want: true,
+		},
+		{
 			name: "array content without image",
-			messages: []auto_router_rule.Message{
+			messages: []rule.Message{
 				{
 					Role: "user",
 					Content: []interface{}{
@@ -140,11 +153,11 @@ func TestMultimodalRule(t *testing.T) {
 			want: false,
 		},
 	}
-	rule := auto_router_rule.Multimodal()
+	r := rule.Multimodal()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := &auto_router_rule.Request{Messages: tt.messages}
-			if got := rule.Match(req); got != tt.want {
+			req := &rule.Request{Messages: tt.messages}
+			if got := r.Match(req); got != tt.want {
 				t.Errorf("Multimodal().Match() = %v, want %v", got, tt.want)
 			}
 		})

@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/auto_router"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 
@@ -37,8 +38,8 @@ func Distribute() func(c *gin.Context) {
 			return
 		}
 		// AUTO model routing: determine the best model for the request
-		if service.IsAutoModel(modelRequest.Model) {
-			if routed := service.RouteAutoModel(c); routed != "" {
+		if auto_router.IsAutoModel(modelRequest.Model) {
+			if routed := auto_router.RouteAutoModel(c); routed != "" {
 				c.Set("auto_original_model", modelRequest.Model)
 				modelRequest.Model = routed
 			}

@@ -1,5 +1,6 @@
-package auto_router_rule
+package rule
 
+// Rule 判断请求是否应路由到特定模型
 type Rule interface {
 	Name() string
 	Match(req *Request) bool
@@ -15,6 +16,7 @@ type Message struct {
 	Content interface{} `json:"content"`
 }
 
+// MatchFirst 遍历规则列表，返回首个匹配的规则
 func MatchFirst(rules []Rule, req *Request) (ruleName string, targetModel string, matched bool) {
 	for _, rule := range rules {
 		if rule.Match(req) {

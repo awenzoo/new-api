@@ -25,6 +25,7 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/auto_router"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -77,8 +78,8 @@ func testChannel(channel *model.Channel, testModel string, endpointType string, 
 	c, _ := gin.CreateTestContext(w)
 
 	testModel = strings.TrimSpace(testModel)
-	if service.IsAutoModel(testModel) {
-		testModel = service.RouteAutoModelStatic()
+	if auto_router.IsAutoModel(testModel) {
+		testModel = auto_router.RouteAutoModelStatic()
 	}
 	if testModel == "" {
 		if channel.TestModel != nil && *channel.TestModel != "" {
