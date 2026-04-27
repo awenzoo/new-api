@@ -137,6 +137,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 					"error": newAPIError.ToOpenAIError(),
 				})
 			}
+			recordRequestLog(c, captureWriter)
 		}
 	}()
 
